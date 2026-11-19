@@ -1,0 +1,19 @@
+route:
+  receiver: webhook-log
+  group_by: [alertname, table]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 2h
+
+receivers:
+  - name: webhook-log
+    webhook_configs:
+      - url: http://alert-sink:5001/alerts
+        send_resolved: true
+    # Slack example - uncomment and add your webhook:
+    # slack_configs:
+    #   - api_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+    #     channel: "#data-quality"
+    #     send_resolved: true
+    #     title: "{{ .CommonAnnotations.summary }}"
+    #     text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"

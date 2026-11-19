@@ -1,0 +1,63 @@
+groups:
+  - name: data-quality
+    rules:
+      - alert: DQCriticalCheckFailed
+        expr: dq_table_critical_failed_checks > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Critical data-quality failure in {{ $labels.table }}"
+          description: "{{ $value }} critical check(s) failing on table {{ $labels.table }}. Open the Grafana dashboard or the Airflow task log for details."
+
+      - alert: DQPassRateLow
+        expr: dq_table_pass_rate < 0.90
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Pass rate for {{ $labels.table }} is {{ $value | humanizePercentage }}"
+          description: "Fewer than 90% of data-quality checks pass for {{ $labels.table }}."
+
+      - alert: DQFreshnessBreached
+        expr: dq_freshness_age_hours > dq_freshness_threshold_hours
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Stale data in {{ $labels.table }}.{{ $labels.column }}"
+          description: "Newest record is {{ $value | printf \"%.1f\" }}h old (limit exceeded)."
+
+      - alert: DQValidationStale
+        expr: time() - dq_validation_last_run_timestamp_seconds > 3600
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "No validation of {{ $labels.table }} for over 1 hour"
+          description: "The DAG may be paused, failing before validation or stuck."
+
+      - alert: DQMetricsMissing
+        expr: absent(dq_table_pass_rate)
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "No data-quality metrics are being received"
+
+  - name: pipeline-health
+    rules:
+      - alert: AirflowTaskFailures
+        expr: sum by (dag_id, task_id) (increase(airflow_ti_finish_total{state="failed"}[10m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Airflow task {{ $labels.dag_id }}.{{ $labels.task_id }} failed"
+
+      - alert: AirflowSchedulerDown
+        expr: rate(airflow_scheduler_heartbeat_total[5m]) == 0 or absent(airflow_scheduler_heartbeat_total)
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Airflow scheduler heartbeat missing"
+
+      - alert: MonitoringTargetDown
+        expr: up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Scrape target {{ $labels.job }} is down"

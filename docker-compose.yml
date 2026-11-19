@@ -1,0 +1,140 @@
+name: dq-platform
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  image: dq-platform-airflow:latest
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__WEBSERVER__SECRET_KEY: dq-platform-demo-secret-key   # shared so the UI can fetch task logs
+    AIRFLOW__METRICS__STATSD_ON: "true"
+    AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+    AIRFLOW__METRICS__STATSD_PORT: "9125"
+    AIRFLOW__METRICS__STATSD_PREFIX: airflow
+    # data-quality platform
+    DQ_WAREHOUSE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/warehouse
+    DQ_PUSHGATEWAY: pushgateway:9091
+    DQ_CONFIG: /opt/dq/config/expectations.yaml
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./dq_platform:/opt/dq/dq_platform
+    - ./config:/opt/dq/config
+    - ./scripts:/opt/dq/scripts
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init_databases.sh:/docker-entrypoint-initdb.d/init_databases.sh:ro
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports: ["8080:8080"]
+    depends_on:
+      airflow-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      retries: 10
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init: {condition: service_completed_successfully}
+
+  # One-shot helper: docker compose run --rm seed --scenario dirty
+  seed:
+    <<: *airflow-common
+    profiles: ["tools"]
+    entrypoint: ["/opt/dq-venv/bin/python", "-m", "scripts.seed_data"]
+    working_dir: /opt/dq
+    environment:
+      <<: *airflow-env
+      PYTHONPATH: /opt/dq
+    restart: "no"
+
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    ports: ["9091:9091"]
+
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.27.2
+    command: ["--statsd.mapping-config=/etc/statsd/mapping.yml"]
+    volumes:
+      - ./monitoring/statsd/mapping.yml:/etc/statsd/mapping.yml:ro
+    ports: ["9102:9102"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports: ["9090:9090"]
+    depends_on: [pushgateway, statsd-exporter, alertmanager]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["9093:9093"]
+    depends_on: [alert-sink]
+
+  # Tiny webhook receiver that logs alerts: `docker compose logs -f alert-sink`
+  alert-sink:
+    image: python:3.11-slim
+    command: ["python", "-u", "/app/app.py"]
+    volumes:
+      - ./monitoring/alert_sink/app.py:/app/app.py:ro
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus, postgres]
+
+volumes:
+  airflow-logs:
+  pgdata:
+  promdata:
+  grafanadata:

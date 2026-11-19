@@ -1,0 +1,28 @@
+# Maps Airflow's StatsD metric names to labelled Prometheus metrics.
+mappings:
+  - match: "airflow.dagrun.duration.*.*"
+    name: airflow_dagrun_duration_seconds
+    observer_type: histogram
+    labels: {status: "$1", dag_id: "$2"}
+  - match: "airflow.dagrun.schedule_delay.*"
+    name: airflow_dagrun_schedule_delay_seconds
+    observer_type: histogram
+    labels: {dag_id: "$1"}
+  - match: "airflow.ti.finish.*.*.*"
+    name: airflow_ti_finish_total
+    match_metric_type: counter
+    labels: {dag_id: "$1", task_id: "$2", state: "$3"}
+  - match: "airflow.ti.start.*.*"
+    name: airflow_ti_start_total
+    match_metric_type: counter
+    labels: {dag_id: "$1", task_id: "$2"}
+  - match: "airflow.operator_failures_*"
+    name: airflow_operator_failures_total
+    match_metric_type: counter
+    labels: {operator: "$1"}
+  - match: "airflow.scheduler.heartbeat"
+    name: airflow_scheduler_heartbeat_total
+    match_metric_type: counter
+  - match: "airflow.dag_processing.import_errors"
+    name: airflow_dag_import_errors
+    match_metric_type: gauge

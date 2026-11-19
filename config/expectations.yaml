@@ -1,0 +1,93 @@
+# Declarative data-quality contract. Each check becomes a Great Expectations expectation.
+#   severity: critical -> fails the Airflow task + blocks the "publish" step
+#             warning  -> recorded, alerted on in Grafana, does not block
+#   mostly:   fraction (0-1) of rows that must pass
+defaults:
+  schema: retail
+
+tables:
+  customers:
+    primary_key: customer_id
+    schema_check:
+      severity: critical
+      exact: true
+      columns:
+        customer_id: integer
+        email: string
+        full_name: string
+        country: string
+        created_at: timestamp
+        updated_at: timestamp
+    checks:
+      - {type: row_count, min: 1, severity: critical}
+      - {type: not_null, column: customer_id, severity: critical}
+      - {type: unique, column: customer_id, severity: critical}
+      - {type: not_null, column: email, severity: critical}
+      - {type: unique, column: email, severity: critical}
+      - {type: regex, column: email, regex: "^[^@\\s]+@[^@\\s]+\\.[A-Za-z]{2,}$", mostly: 0.99, severity: warning}
+      - {type: not_null, column: full_name, mostly: 0.98, severity: warning}
+      - {type: not_null, column: country, mostly: 0.95, severity: warning}
+      - {type: freshness, column: updated_at, max_age_hours: 48, severity: critical}
+
+  products:
+    primary_key: product_id
+    schema_check:
+      severity: critical
+      exact: true
+      columns:
+        product_id: integer
+        sku: string
+        name: string
+        category: string
+        price: number
+        updated_at: timestamp
+    checks:
+      - {type: row_count, min: 1}
+      - {type: not_null, column: product_id}
+      - {type: unique, column: product_id}
+      - {type: unique, column: sku}
+      - {type: not_null, column: name, mostly: 0.99, severity: warning}
+      - {type: between, column: price, min: 0.01, max: 100000, severity: critical}
+      - {type: freshness, column: updated_at, max_age_hours: 72, severity: warning}
+
+  orders:
+    primary_key: order_id
+    schema_check:
+      severity: critical
+      exact: true
+      columns:
+        order_id: integer
+        customer_id: integer
+        status: string
+        order_total: number
+        order_ts: timestamp
+        updated_at: timestamp
+    checks:
+      - {type: row_count, min: 1}
+      - {type: not_null, column: order_id}
+      - {type: unique, column: order_id}
+      - {type: not_null, column: customer_id}
+      - {type: referential, column: customer_id, ref_table: customers, ref_column: customer_id, severity: critical}
+      - {type: in_set, column: status, values: [pending, paid, shipped, delivered, cancelled, refunded], severity: critical}
+      - {type: between, column: order_total, min: 0, max: 1000000, severity: critical}
+      - {type: freshness, column: updated_at, max_age_hours: 24, severity: critical}
+
+  order_items:
+    primary_key: item_id
+    schema_check:
+      severity: critical
+      exact: true
+      columns:
+        item_id: integer
+        order_id: integer
+        product_id: integer
+        quantity: integer
+        unit_price: number
+    checks:
+      - {type: row_count, min: 1}
+      - {type: unique, column: item_id}
+      - {type: unique_together, columns: [order_id, product_id], severity: warning}
+      - {type: referential, column: order_id, ref_table: orders, ref_column: order_id, severity: critical}
+      - {type: referential, column: product_id, ref_table: products, ref_column: product_id, severity: critical}
+      - {type: between, column: quantity, min: 1, max: 1000, severity: critical}
+      - {type: between, column: unit_price, min: 0.01, max: 100000, severity: warning}
