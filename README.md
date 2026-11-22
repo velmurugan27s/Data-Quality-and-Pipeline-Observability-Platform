@@ -1,127 +1,376 @@
 # Data Quality & Pipeline Observability Platform
 
-**Airflow · Great Expectations · PostgreSQL · Prometheus · Grafana · Alertmanager**
+**An automated data quality validation and pipeline monitoring platform built with Python, Apache Airflow, Great Expectations, PostgreSQL, Prometheus, and Grafana.**
 
-An automated platform that validates warehouse tables on a schedule, stores every result, blocks bad data
-from being published, and exposes pipeline health and data-quality metrics with alerting.
+The platform automates data validation across multiple quality dimensions, detects data anomalies, enforces severity-based quality gates, stores historical validation results, and provides monitoring dashboards and alerts.
 
-```
- PostgreSQL (retail raw layer)
-        │  read
-        ▼
- Airflow DAG  dq_pipeline ──► Great Expectations suites (one per table, built from config/expectations.yaml)
-   validate_* ─► summarize (quality gate) ─► publish_certified_data
-        │ results                │ metrics                      │ task/DAG stats
-        ▼                        ▼                              ▼
- PostgreSQL  dq.*          Pushgateway ─► Prometheus ◄── StatsD exporter
- (history, bad row IDs)                        │  │
-        │                                      │  └─► Alertmanager ─► webhook / Slack
-        └──────────────► Grafana ◄─────────────┘
-```
+It is designed to help data engineering teams identify data quality issues early and prevent unreliable data from reaching downstream consumers.
 
-## What it checks
+---
 
-| Dimension | Check type (YAML) | Great Expectations expectation |
-|---|---|---|
-| Duplicates | `unique`, `unique_together` | `ExpectColumnValuesToBeUnique`, `ExpectCompoundColumnsToBeUnique` |
-| Missing values | `not_null` (+ `mostly`) | `ExpectColumnValuesToNotBeNull` |
-| Schema consistency | `schema_check` | `ExpectTableColumnsToMatchSet` (exact) + `ExpectColumnValuesToBeInTypeList` |
-| Referential integrity | `referential` | parent-key lookup → `ExpectColumnValuesToBeInSet` on an orphan flag |
-| Data freshness | `freshness` (`max_age_hours`) | record-age column → `ExpectColumnMinToBeBetween` |
-| Validity | `regex`, `in_set`, `between` | `…MatchRegex`, `…BeInSet`, `…BeBetween` |
-| Volume | `row_count` | `ExpectTableRowCountToBeBetween` |
+## Architecture
 
-Each check has a **severity**: `critical` fails the Airflow task and blocks `publish_certified_data`;
-`warning` is recorded, graphed and alerted on but does not block.
-For every failure the platform stores the **primary keys of the offending rows** and a sample of the bad values.
+```mermaid
+flowchart TD
+    A["PostgreSQL<br/>Raw Data Layer"] --> B["Apache Airflow<br/>DQ Pipeline DAG"]
 
-## Quick start
+    B --> C["Great Expectations<br/>Validation Suites"]
+    D["YAML Configuration<br/>Validation Rules"] --> C
 
-Requires Docker + Docker Compose.
+    C --> E["Validation Results"]
+    E --> F["Quality Gate<br/>Critical / Warning"]
 
-```bash
-make up                 # builds the Airflow image and starts ~10 containers (first build takes a few minutes)
-make seed-dirty         # load demo data containing every kind of defect
-make run                # or wait: the DAG runs every 10 minutes
+    F -->|Passed| G["Publish Certified Data"]
+    F -->|Failed| H["Block Data Publishing"]
+
+    E --> I["PostgreSQL<br/>Validation History"]
+
+    E --> J["Prometheus Pushgateway"]
+    B --> K["StatsD Exporter"]
+
+    J --> L["Prometheus"]
+    K --> L
+
+    L --> M["Grafana Dashboards"]
+    L --> N["Alertmanager"]
+    N --> O["Webhook / Slack"]
 ```
 
-| Service | URL | Login |
-|---|---|---|
-| Airflow | http://localhost:8080 | admin / admin |
-| Grafana (folder *Data Quality*) | http://localhost:3000 | admin / admin |
-| Prometheus / Alerts | http://localhost:9090 | |
-| Alertmanager | http://localhost:9093 | |
+### Architecture Workflow
 
-`make logs-alerts` shows alerts as Alertmanager delivers them.
+1. **Data Source:** PostgreSQL provides the raw warehouse tables for validation.
+2. **Orchestration:** Apache Airflow schedules and coordinates validation workflows.
+3. **Validation:** Great Expectations executes validation suites generated from YAML configuration.
+4. **Quality Gates:** Validation results are evaluated according to severity levels.
+5. **Result Storage:** PostgreSQL stores historical validation results and details of failed records.
+6. **Metrics Collection:** Prometheus collects data quality and Airflow execution metrics.
+7. **Observability:** Grafana visualizes pipeline health and data quality metrics.
+8. **Alerting:** Alertmanager sends alerts for critical quality failures and pipeline issues.
 
-## Demo scenarios
+---
 
-```bash
-make seed-clean   # all checks pass; DAG run succeeds; publish_certified_data runs
-make seed-dirty   # duplicates, nulls, malformed emails, orphan FKs, negative prices, invalid status...
-make seed-stale   # data stopped arriving -> freshness breach (orders=critical, products=warning)
-make seed-drift   # upstream added a column and changed order_total to TEXT -> schema failure
-```
-After seeding, run `make run`. With `dirty`/`stale`/`drift` the DAG run **fails at the quality gate** and
-`publish_certified_data` is not executed; Grafana shows the failing checks with sample bad IDs, and
-`DQCriticalCheckFailed` / `DQFreshnessBreached` fire within ~1–2 minutes.
-You can also trigger the `dq_load_demo_data` DAG from the Airflow UI to switch scenarios.
+## Key Features
 
-## Repo layout
+### 1. Automated Data Quality Validation
 
-```
-config/expectations.yaml   the data-quality contract (add tables/checks here, no code needed)
-dq_platform/               Python package: suite_builder, runner, store, metrics, cli
-dags/dq_pipeline.py        validation DAG (+ dq_load_demo_data.py)
-scripts/seed_data.py       demo warehouse + defect injection
-monitoring/                Prometheus rules, Alertmanager, StatsD mapping, Grafana dashboard (provisioned)
-tests/                     unit tests + optional PostgreSQL integration test
-```
+Implements seven data quality dimensions:
 
-## Metrics (Prometheus)
+| Dimension | Validation |
+|---|---|
+| Completeness | Detects missing and NULL values |
+| Uniqueness | Identifies duplicate records and duplicate combinations |
+| Validity | Checks regex patterns, allowed values, and numeric ranges |
+| Consistency | Validates schema structure and data types |
+| Referential Integrity | Detects orphan records and invalid foreign-key relationships |
+| Freshness | Identifies stale data using configurable age thresholds |
+| Volume | Detects unexpected changes in record counts |
 
-Pushed per table (label `table`) by the validation tasks via the Pushgateway:
-`dq_table_pass_rate`, `dq_table_status`, `dq_table_checks_total`, `dq_table_failed_checks`,
-`dq_table_critical_failed_checks`, `dq_failed_checks{dimension,severity}`, `dq_check_success{check,…}`,
-`dq_check_unexpected_percent`, `dq_freshness_age_hours`, `dq_freshness_threshold_hours`, `dq_table_rows`,
-`dq_validation_duration_seconds`, `dq_validation_last_run_timestamp_seconds`; pipeline-level:
-`dq_pipeline_pass_rate`, `dq_pipeline_critical_failed_checks`.
-Airflow itself reports through StatsD: `airflow_dagrun_duration_seconds`, `airflow_ti_finish_total{state}`,
-`airflow_scheduler_heartbeat_total`.
+### 2. Configuration-Driven Validation
 
-**Alerts** (`monitoring/prometheus/alerts.yml`): critical check failed, pass rate < 90 %, freshness breached,
-validation stale (> 1 h), metrics missing, Airflow task failures, scheduler heartbeat lost, scrape target down.
-To send to Slack, uncomment the `slack_configs` block in `monitoring/alertmanager/alertmanager.yml`.
+Uses YAML-based configuration to define validation rules without modifying the core validation logic.
 
-## Adding a check
+Example:
 
 ```yaml
-# config/expectations.yaml
 orders:
   checks:
-    - {type: between, column: order_total, min: 0, max: 1000000, severity: critical}
-    - {type: referential, column: customer_id, ref_table: customers, ref_column: customer_id}
-```
-The DAG creates one task per table in the file; new tables appear automatically.
+    - type: between
+      column: order_total
+      min: 0
+      max: 1000000
+      severity: critical
 
-## Run without Docker / tests
+    - type: referential
+      column: customer_id
+      ref_table: customers
+      ref_column: customer_id
+```
+
+The platform builds validation suites dynamically using the configured rules.
+
+### 3. Severity-Based Quality Gates
+
+Each validation rule supports severity levels:
+
+- **Critical:** Fails the Airflow task and prevents certified data publishing.
+- **Warning:** Records the issue and exposes it through monitoring and alerting without blocking publishing.
+
+For failed checks, the platform stores offending record identifiers and samples of invalid values.
+
+### 4. Workflow Orchestration with Apache Airflow
+
+- Schedules recurring data validation workflows.
+- Creates validation tasks for configured tables.
+- Summarizes validation results.
+- Enforces quality gates before publishing.
+- Supports retries and repeatable execution.
+
+### 5. Pipeline Monitoring and Observability
+
+Integrates Prometheus and Grafana to monitor:
+
+- Data quality pass rates.
+- Failed validation checks.
+- Critical quality failures.
+- Data freshness.
+- Validation execution duration.
+- Airflow DAG and task execution metrics.
+- Scheduler health.
+
+### 6. Automated Alerting
+
+Uses Prometheus alert rules and Alertmanager to identify:
+
+- Critical data quality failures.
+- Data freshness breaches.
+- Validation pass rates below configured thresholds.
+- Stale validation results.
+- Missing metrics.
+- Airflow task failures.
+- Scheduler heartbeat failures.
+- Unavailable monitoring targets.
+
+---
+
+## Technology Stack
+
+| Category | Technologies |
+|---|---|
+| Programming | Python |
+| Workflow Orchestration | Apache Airflow |
+| Data Quality | Great Expectations |
+| Database | PostgreSQL |
+| Monitoring | Prometheus |
+| Visualization | Grafana |
+| Alerting | Alertmanager |
+| Metrics Collection | Pushgateway, StatsD Exporter |
+| Configuration | YAML |
+| Containerization | Docker, Docker Compose |
+| Testing | Pytest |
+
+---
+
+## Repository Structure
+
+```text
+Data-Quality-and-Pipeline-Observability-Platform/
+│
+├── config/
+│   └── expectations.yaml
+│
+├── dags/
+│   ├── dq_pipeline.py
+│   └── dq_load_demo_data.py
+│
+├── docker/
+│
+├── dq_platform/
+│   ├── suite_builder
+│   ├── runner
+│   ├── store
+│   ├── metrics
+│   └── cli
+│
+├── monitoring/
+│   ├── prometheus/
+│   ├── alertmanager/
+│   └── grafana/
+│
+├── scripts/
+│   └── seed_data.py
+│
+├── sql/
+│
+├── tests/
+│
+├── docker-compose.yml
+├── requirements.txt
+├── requirements-dev.txt
+├── Makefile
+└── README.md
+```
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+Ensure the following tools are installed:
+
+- Docker
+- Docker Compose
+- Git
+- Make
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/velmurugan27s/Data-Quality-and-Pipeline-Observability-Platform.git
+
+cd Data-Quality-and-Pipeline-Observability-Platform
+```
+
+### 2. Start the Platform
+
+```bash
+make up
+```
+
+This builds the Airflow image and starts the Docker Compose services.
+
+### 3. Load Demo Data
+
+```bash
+make seed-dirty
+```
+
+This loads sample data containing intentional quality issues.
+
+### 4. Execute the Validation Pipeline
+
+```bash
+make run
+```
+
+Alternatively, the DAG is configured to run every 10 minutes.
+
+---
+
+## Accessing the Services
+
+Once the containers are running, access the following interfaces:
+
+| Service | URL | Default Local Credentials |
+|---|---|---|
+| Airflow | http://localhost:8080 | admin / admin |
+| Grafana | http://localhost:3000 | admin / admin |
+| Prometheus | http://localhost:9090 | — |
+| Alertmanager | http://localhost:9093 | — |
+
+**Note:** Default credentials are intended only for local development. Change them before exposing services outside your local environment.
+
+---
+
+## Testing Different Data Quality Scenarios
+
+The project includes multiple demo scenarios to simulate real-world data quality problems.
+
+| Scenario | Command | Expected Behavior |
+|---|---|---|
+| Clean Data | `make seed-clean` | All checks pass |
+| Dirty Data | `make seed-dirty` | Detects duplicates, NULLs, invalid values, and orphan records |
+| Stale Data | `make seed-stale` | Detects freshness violations |
+| Schema Drift | `make seed-drift` | Detects unexpected schema and data-type changes |
+
+After loading a scenario, execute:
+
+```bash
+make run
+```
+
+For failing scenarios, the quality gate prevents `publish_certified_data` from executing. The failed checks are visible in Grafana, and configured Prometheus alerts are triggered.
+
+---
+
+## Prometheus Metrics
+
+The platform exposes metrics for tracking data quality and pipeline health.
+
+Examples include:
+
+| Metric | Purpose |
+|---|---|
+| `dq_table_pass_rate` | Data quality pass rate per table |
+| `dq_table_status` | Current table validation status |
+| `dq_failed_checks` | Failed checks by dimension and severity |
+| `dq_freshness_age_hours` | Age of the latest data |
+| `dq_table_rows` | Number of rows in a table |
+| `dq_validation_duration_seconds` | Validation execution duration |
+| `dq_pipeline_pass_rate` | Overall pipeline pass rate |
+| `dq_pipeline_critical_failed_checks` | Critical failures across the pipeline |
+
+Airflow execution metrics are also collected through StatsD and Prometheus.
+
+---
+
+## Running Tests
+
+Install development dependencies:
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                                   # unit tests (SQLite + in-memory), no services needed
-DQ_TEST_URL=postgresql+psycopg2://user:pw@localhost:5432/warehouse pytest   # + PostgreSQL integration
+```
+
+Run unit tests:
+
+```bash
+pytest
+```
+
+Run PostgreSQL integration tests:
+
+```bash
+DQ_TEST_URL=postgresql+psycopg2://user:pw@localhost:5432/warehouse pytest
+```
+
+Run validation through the CLI:
+
+```bash
 python -m scripts.seed_data --scenario dirty
+
 python -m dq_platform.cli run --table all
 ```
-CLI exit codes: `0` ok · `1` critical data-quality failure · `2` infrastructure error (Airflow retries only this one).
 
-## Design notes
+### CLI Exit Codes
 
-* **Isolated GX environment.** Great Expectations runs from a dedicated venv (`/opt/dq-venv`) inside the Airflow
-  image, so its dependency tree never conflicts with Airflow's pinned packages. The DAG calls the CLI as a subprocess.
-* **Pushgateway for DQ metrics** because tasks are short-lived; Airflow's own metrics use StatsD → Prometheus.
-* **Results in Postgres as well as Prometheus**: Prometheus answers "how is it trending?", Postgres answers
-  "which exact rows failed in run X?".
-* **Idempotent**: re-running a task (Airflow retry) replaces that table's results for the run.
-* **Scaling note**: tables are loaded into pandas, which is ideal up to a few million rows. For larger tables, switch
-  `data.py` to a GX SQL datasource (or sample/partition by `updated_at`) — the YAML contract and everything downstream stay the same.
+| Exit Code | Meaning |
+|---|---|
+| `0` | Validation successful |
+| `1` | Critical data quality failure |
+| `2` | Infrastructure error |
+
+---
+
+## Engineering Design Decisions
+
+**Configuration-driven validation:** Validation rules are maintained in YAML, making it easier to introduce new checks without changing the core validation implementation.
+
+**Isolated Great Expectations environment:** Great Expectations runs inside a dedicated virtual environment in the Airflow image to avoid dependency conflicts with Airflow packages.
+
+**Prometheus Pushgateway:** Used for short-lived validation tasks so their metrics remain available for Prometheus scraping.
+
+**PostgreSQL and Prometheus:** PostgreSQL stores detailed validation results and failed record information, while Prometheus provides time-series monitoring and alerting.
+
+**Idempotent execution:** Re-running a validation task replaces that table's results for the current run, supporting repeatable Airflow retries.
+
+**Scaling consideration:** The current implementation loads tables into pandas, which is suitable for datasets up to a few million rows. Larger workloads can be supported by moving to a Great Expectations SQL datasource or sampling and partitioning strategies.
+
+---
+
+## What I Learned
+
+Through this project, I gained practical experience with:
+
+- Designing automated data quality validation workflows.
+- Orchestrating data validation using Apache Airflow.
+- Building configuration-driven validation systems.
+- Implementing severity-based data quality gates.
+- Storing historical validation results in PostgreSQL.
+- Monitoring data quality and pipeline health using Prometheus and Grafana.
+- Configuring automated alerts for data and infrastructure failures.
+- Containerizing and running multi-service applications using Docker Compose.
+
+---
+
+## Project Links
+
+**GitHub Repository:**  
+https://github.com/velmurugan27s/Data-Quality-and-Pipeline-Observability-Platform
+
+---
+
+**Author:** Velmurugan S.  
+**Focus:** Data Engineering | Data Quality | Pipeline Observability
+
+If you find this project useful, feel free to explore the repository and share your feedback.
